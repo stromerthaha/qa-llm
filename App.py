@@ -1,9 +1,8 @@
 import logging
+import streamlit as st
 import os
 import time
-import shutil
 from dotenv import load_dotenv
-import streamlit as st
 from langchain_groq import ChatGroq
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_cohere import ChatCohere
@@ -14,6 +13,8 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
+import shutil
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -54,87 +55,34 @@ def initialize_model(model_option):
 
 llm = initialize_model(model_option)
 
-# Sidebar - FAISS Database Management
+# Sidebar - FAISS Database Management (with delete option)
 st.sidebar.subheader("📂 Database Management")
 existing_dbs = [d for d in os.listdir(FAISS_DB_DIR) if os.path.isdir(os.path.join(FAISS_DB_DIR, d))]
 selected_db = st.sidebar.selectbox("Select a FAISS Database", ["Create New Database"] + existing_dbs)
 
-# Delete Database Option
+# Add the "Delete Database" functionality
 delete_db = st.sidebar.selectbox("Or, select a FAISS Database to delete", ["None"] + existing_dbs)
 if delete_db != "None":
     if st.sidebar.button("Delete Selected Database"):
         db_path_to_delete = os.path.join(FAISS_DB_DIR, delete_db)
         try:
-            shutil.rmtree(db_path_to_delete)
+            shutil.rmtree(db_path_to_delete)  # Remove directory and its contents
             st.sidebar.success(f"✅ Successfully deleted the database: {delete_db}")
         except Exception as e:
             st.sidebar.error(f"⚠️ Error deleting the database: {e}")
 
-# Business Problem Templates
-prompt_template_case_review = """
-You are a legal assistant reviewing all deposition documents submitted by the Defendant.
-Your task is to carefully examine each document and determine which ones contain the most critical information relevant to the case.
-Identify key facts, inconsistencies, or evidence that may influence the outcome.
+# Improved Prompt Template
+prompt_template = """
+You are a document assistant. Answer the user's question based on the provided context.
 
 Context: {context}
 Question: {input}
 
-Provide a clear summary highlighting the most important documents or excerpts.
+Answer the question clearly and concisely.
 """
-prompt_case_review = ChatPromptTemplate.from_template(prompt_template_case_review)
+prompt = ChatPromptTemplate.from_template(prompt_template)
 
-prompt_template_generate_questions = """
-You are a legal assistant reviewing deposition documents to better understand the case details.
-Based on the provided context, generate 3-5 specific, insightful questions that probe into key details and potential inconsistencies in the case.
-These questions should help in clarifying uncertainties and identifying further lines of inquiry.
-
-Context: {context}
-Question: {input}
-
-List the generated questions in a clear and organized manner.
-"""
-prompt_generate_questions = ChatPromptTemplate.from_template(prompt_template_generate_questions)
-
-prompt_template_email_info = """
-You are a legal assistant reviewing deposition documents and related emails discussing material changes.
-Your task is to extract the names of each person mentioned in any email that discusses a material change.
-Additionally, identify the material changes mentioned and specify the corresponding file number or page number where they appear.
-
-Context: {context}
-Question: {input}
-
-Provide a detailed list of names along with the detected material changes and their references.
-"""
-prompt_email_info = ChatPromptTemplate.from_template(prompt_template_email_info)
-
-prompt_template_general_qa = """
-You are a legal expert answering questions based on legal documents.
-Use the provided context to generate a well-reasoned, concise, and accurate response.
-
-Context: {context}
-Question: {input}
-
-Provide an accurate and well-structured answer.
-"""
-prompt_general_qa = ChatPromptTemplate.from_template(prompt_template_general_qa)
-
-# Business Problem Selection (Optional)
-st.sidebar.subheader("📌 Select Business Problem (Optional)")
-business_problem = st.sidebar.radio("Choose Business Problem (or leave empty for General QA)", [
-    "Review Documents for Case Relevance", 
-    "Generate Specific Case Questions", 
-    "Extract Names and Material Changes from Emails"
-], index=None)
-
-# Assign Prompt Based on Selection (Default to General QA if None is chosen)
-prompt_mapping = {
-    "Review Documents for Case Relevance": prompt_case_review,
-    "Generate Specific Case Questions": prompt_generate_questions,
-    "Extract Names and Material Changes from Emails": prompt_email_info
-}
-prompt = prompt_mapping.get(business_problem, prompt_general_qa)
-
-# Function to Extract Text from PDFs
+# Function to extract text from PDFs
 def extract_text_from_pdfs(uploaded_files):
     documents = []
     for uploaded_file in uploaded_files:
@@ -142,98 +90,106 @@ def extract_text_from_pdfs(uploaded_files):
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         loader = PyPDFLoader(file_path)
-        try:
-            docs = loader.load()
-            documents.extend(docs)
-        except Exception as e:
-            st.warning(f"⚠️ Error reading {uploaded_file.name}: {e}")
+        docs = loader.load()
+        documents.extend(docs)
     return documents
 
-# Function to Load an Existing FAISS Database
-def load_faiss_db(db_path):
-    try:
-        if "embeddings" not in st.session_state:
-            st.session_state.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-        
-        # Load the FAISS index
-        st.session_state.vectors = FAISS.load_local(db_path, st.session_state.embeddings, allow_dangerous_deserialization=True)
-        st.success(f"✅ Successfully loaded the FAISS database from: {db_path}")
-    except Exception as e:
-        st.error(f"⚠️ Error loading FAISS database: {e}")
-
-# Function to Add PDFs to an Existing FAISS Database
-def append_to_existing_faiss_db(uploaded_files, db_path):
-    if "embeddings" not in st.session_state:
-        st.session_state.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-
-    # Extract documents from PDFs
-    docs = extract_text_from_pdfs(uploaded_files)
-    if not docs:
-        st.warning("⚠️ No documents were processed. Please check the uploaded files.")
-        return
-
-    # Split the documents into chunks
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    final_documents = text_splitter.split_documents(docs)
-
-    # Load the existing FAISS index and append new documents
-    try:
-        st.session_state.vectors.add_documents(final_documents)
-        st.session_state.vectors.save_local(db_path)
-        st.success(f"✅ Successfully added new documents to the existing FAISS database: {db_path}")
-    except Exception as e:
-        st.error(f"⚠️ Error loading FAISS database: {e}")
-
-# Function to Create a New FAISS Database
-def create_new_faiss_db(uploaded_files):
+# Function to create a new vector store
+def vector_embedding(uploaded_files):
     timestamp = str(int(time.time()))
     db_name = f"faiss_db_{timestamp}"
     db_path = os.path.join(FAISS_DB_DIR, db_name)
     os.makedirs(db_path, exist_ok=True)
-
+    
     if "embeddings" not in st.session_state:
         st.session_state.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-
-    # Extract and process documents
+    
     docs = extract_text_from_pdfs(uploaded_files)
-    if not docs:
-        st.warning("⚠️ No documents were processed. Please check the uploaded files.")
-        return
-
-    # Split documents into chunks
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     final_documents = text_splitter.split_documents(docs)
-
-    # Create a new vector store and save it
+    
     st.session_state.vectors = FAISS.from_documents(final_documents, st.session_state.embeddings)
     st.session_state.vectors.save_local(db_path)
-    st.success(f"✅ Created a new FAISS database: {db_name}")
+    
+    st.success(f"✅ Data has been ingested into the new vector store: {db_name}")
+
+# Load selected FAISS database
+if selected_db != "Create New Database":
+    db_path = os.path.join(FAISS_DB_DIR, selected_db)
+    try:
+        if "embeddings" not in st.session_state:
+            st.session_state.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        st.session_state.vectors = FAISS.load_local(db_path, st.session_state.embeddings, allow_dangerous_deserialization=True)
+        st.success(f"✅ Loaded FAISS database: {selected_db}")
+    except Exception as e:
+        st.error(f"⚠️ Error loading FAISS database: {e}")
 
 # Upload PDFs
 uploaded_files = st.file_uploader("📂 Upload PDF Documents", type=["pdf"], accept_multiple_files=True)
-if st.button("Ingest Data into FAISS Database") and uploaded_files:
-    if selected_db != "Create New Database":
-        # Append to existing FAISS database
-        db_path = os.path.join(FAISS_DB_DIR, selected_db)
-        append_to_existing_faiss_db(uploaded_files, db_path)
-    else:
-        # Create a new FAISS database
-        create_new_faiss_db(uploaded_files)
+if st.button("Ingest Data into Vector Store") and uploaded_files:
+    vector_embedding(uploaded_files)
 
-# Load the selected FAISS database (if any)
-if selected_db != "Create New Database":
-    db_path = os.path.join(FAISS_DB_DIR, selected_db)
-    load_faiss_db(db_path)
-
-# Query Section
+# Query Section with enhanced UI and logging
 st.subheader("🔍 Ask a question")
 query = st.text_input("Enter your question here:")
 if query:
     if "vectors" in st.session_state:
-        retriever = st.session_state.vectors.as_retriever()
         document_chain = create_stuff_documents_chain(llm, prompt)
+        retriever = st.session_state.vectors.as_retriever()
         retrieval_chain = create_retrieval_chain(retriever, document_chain)
-        response = retrieval_chain.invoke({'input': query})
-        st.write("📝 Answer:", response['answer'].strip())
+
+        with st.spinner('Retrieving and generating answer...'):
+            start = time.time()
+            response = retrieval_chain.invoke({'input': query})
+            end = time.time()
+
+            response_text = response['answer'].strip()
+
+            # Log the query and response for transparency
+            logging.info(f"Query: {query} | Answer: {response_text} | Time: {round(end - start, 2)}s")
+
+            # Handle bad responses and display to user
+            if response_text.startswith("Human:") or "I couldn't find relevant information" in response_text:
+                response_text = "I couldn't find relevant information in the documents."
+
+            st.write(f"⏳ Response time: {round(end - start, 2)} seconds")
+            st.write("📝 Answer:", response_text)
     else:
         st.warning("⚠️ Please ingest data first by uploading documents.")
+
+# Enhancements to improve UX:
+# 1. Instructions for users
+st.sidebar.subheader("📝 Instructions")
+st.sidebar.write(
+    "1. Select a model for question answering (Groq, Google GenAI, Cohere, Mistral AI)."
+    "\n2. Upload your PDF documents using the uploader."
+    "\n3. Press the 'Ingest Data into Vector Store' button."
+    "\n4. Ask a question related to the uploaded documents, and the system will provide an answer."
+)
+
+# 2. Add loading spinner to show when the model is processing
+with st.spinner('Processing your question, please wait...'):
+    pass  # The processing occurs in the query section above
+
+# 3. Provide a loading indicator for file uploads
+if uploaded_files:
+    st.info(f"📑 {len(uploaded_files)} file(s) uploaded. Ready for ingestion.")
+else:
+    st.info("📂 Please upload PDF documents to start.")
+
+# Adding Custom CSS for better frontend styling
+st.markdown(""" 
+    <style>
+        /* Custom Styles */
+        .css-1y4d2l7 { background-color: #f0f4f8; }
+        .css-ffhzg2 { font-size: 1.2rem; color: #333; }
+        .css-1v3oer { background-color: #FAF7F0; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); }
+        .sidebar .sidebar-content { padding: 20px; }
+        .css-vl7r5d { background-color: #f8f9fa; border-radius: 5px; }
+        .stButton button { background-color: #5c6bc0; color: white; font-weight: bold; padding: 10px; border-radius: 5px; }
+        .stButton button:hover { background-color: #3f51b5; }
+        .stTextInput input { border-radius: 8px; padding: 12px; }
+        .stInfo { background-color: #e3f2fd; color: #1e88e5; }
+        .stWarning { background-color: #fff3e0; color: #f57c00; }
+    </style>
+""", unsafe_allow_html=True)
